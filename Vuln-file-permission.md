@@ -2,8 +2,7 @@
 
 ## Challenge Info
 
--   **Name**: Vuln file permission\
--   **Points**: 1000\
+-   **Name**: Vuln file permission
 -   **Category**: Privilege Escalation / File Permission Shenanigans
 
 ------------------------------------------------------------------------
