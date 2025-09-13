@@ -1,5 +1,5 @@
 
-# SoHard — Misc (1000 pts) — Write‑up
+# SoHard
 
 **Event:** CyberCon (assumed from flag format)  
 **Category:** Misc  
