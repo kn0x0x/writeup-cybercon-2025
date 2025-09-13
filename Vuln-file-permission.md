@@ -144,4 +144,4 @@ All of that added up to a free flag.
 -   Be careful with libraries that allow code execution.\
 -   Audit file permissions regularly.
 
-\[Insert screenshot/meme space here\]
+
